@@ -195,6 +195,7 @@ def get_ken_burns_filter(width, height, duration, effect_type=None, fps=30):
 
     return kb_filter, effect_type
 
+@app.route('/', methods=['GET'])
 @app.route('/health', methods=['GET'])
 def health():
     return jsonify({
@@ -1196,11 +1197,14 @@ def generate_slideshow():
     # ジョブを登録してバックグラウンドスレッドで実行開始
     _save_job(job_id, {"status": "running", "result": None, "error": None, "progress": "starting"})
 
+    # request.host_urlはリクエストコンテキスト外（スレッド内）では使えないため、ここで取得する
+    base_url = request.host_url.rstrip('/')
+
     def run_job():
         try:
             _run_slideshow_job(job_id, job_dir, scenes, audio_b64, audio_url, audio_path_direct,
                                resolution, fps, title, subtitle_font_size, enable_ken_burns,
-                               enable_transitions, transition_duration, test_mode)
+                               enable_transitions, transition_duration, test_mode, base_url)
         except Exception as e:
             job = _load_job(job_id) or {}
             job["status"] = "error"
@@ -1217,7 +1221,7 @@ def generate_slideshow():
 
 def _run_slideshow_job(job_id, job_dir, scenes, audio_b64, audio_url, audio_path_direct,
                        resolution, fps, title, subtitle_font_size, enable_ken_burns,
-                       enable_transitions, transition_duration, test_mode):
+                       enable_transitions, transition_duration, test_mode, base_url=''):
     """バックグラウンドで動画生成を実行するメイン処理"""
     def update_progress(msg):
         job = _load_job(job_id) or {}
@@ -1412,7 +1416,8 @@ def _run_slideshow_job(job_id, job_dir, scenes, audio_b64, audio_url, audio_path
             except Exception as e:
                 print(f"[GENERATE-SLIDESHOW] Thumbnail error: {e}", file=sys.stderr, flush=True)
 
-        base_url = request.host_url.rstrip('/')
+        if not base_url:
+            base_url = 'https://ffmpeg-video-server.onrender.com'
         response_data = {
             "success": True,
             "job_id": job_id,
