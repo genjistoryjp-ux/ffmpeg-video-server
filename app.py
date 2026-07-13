@@ -1042,9 +1042,12 @@ def download(filename):
     return send_file(filepath, as_attachment=True)
 
 if __name__ == '__main__':
-    print("Video Merge Server starting on port 5555...")
+    import os as _os
+    port = int(_os.environ.get('PORT', 10000))
+    print(f"Video Merge Server starting on port {port} with waitress...")
     print("Features: Ken Burns effect, Text animation, xfade transitions")
-    app.run(host='0.0.0.0', port=5555, debug=False)
+    from waitress import serve
+    serve(app, host='0.0.0.0', port=port, threads=8, channel_timeout=0)
 
 
 # =============================================

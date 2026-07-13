@@ -16,7 +16,6 @@ COPY app.py .
 # 作業ディレクトリを作成
 RUN mkdir -p /tmp/video_merge /tmp/video_output /tmp/audio_upload /tmp/video_jobs
 
-# Render.comの$PORTを使用、gthreadワーカー、タイムアウト無効
 EXPOSE 10000
 
-CMD ["sh", "-c", "gunicorn app:app --bind 0.0.0.0:${PORT:-10000} --worker-class gthread --threads 4 --timeout 0 --workers 1 --keep-alive 65 --graceful-timeout 0"]
+CMD ["sh", "-c", "python app.py"]
