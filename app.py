@@ -31,6 +31,10 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 FONT_PATH = "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"
 FONT_PATH_REGULAR = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
 
+# 非同期ジョブ管理（Render.comの30分タイムアウト回避）
+_jobs = {}  # job_id -> {"status": "pending"|"running"|"done"|"error", "result": {...}, "error": str}
+_jobs_lock = threading.Lock()
+
 def cleanup_old_files():
     while True:
         time.sleep(3600)
@@ -1143,7 +1147,8 @@ def generate_image_flux(scene_data, job_dir, index):
 def generate_slideshow():
     """
     シーンデータからFlux APIで画像生成→FFmpegでスライドショー動画を作成する統合エンドポイント。
-    n8nのメモリ問題を回避するため、全処理をサーバー側で実行する。
+    非同期処理（Render.comの30分タイムアウト回避）: job_idを即座に返してバックグラウンドで処理。
+    /job-status/{job_id}で進捗・完了をポーリングする。
     """
     data = request.get_json(force=True, silent=True)
     if not data:
@@ -1169,7 +1174,36 @@ def generate_slideshow():
     job_dir = os.path.join(WORK_DIR, job_id)
     os.makedirs(job_dir, exist_ok=True)
 
-    print(f"[GENERATE-SLIDESHOW] Job {job_id}: {len(scenes)} scenes, audio_url={bool(audio_url)}, audio_b64={bool(audio_b64)}", file=sys.stderr, flush=True)
+    # ジョブを登録してバックグラウンドスレッドで実行開始
+    with _jobs_lock:
+        _jobs[job_id] = {"status": "running", "result": None, "error": None, "progress": "starting"}
+
+    def run_job():
+        try:
+            _run_slideshow_job(job_id, job_dir, scenes, audio_b64, audio_url, audio_path_direct,
+                               resolution, fps, title, subtitle_font_size, enable_ken_burns,
+                               enable_transitions, transition_duration, test_mode)
+        except Exception as e:
+            with _jobs_lock:
+                _jobs[job_id]["status"] = "error"
+                _jobs[job_id]["error"] = str(e)
+            print(f"[JOB {job_id}] Unhandled error: {traceback.format_exc()}", file=sys.stderr, flush=True)
+
+    t = threading.Thread(target=run_job, daemon=True)
+    t.start()
+
+    print(f"[GENERATE-SLIDESHOW] Job {job_id} started: {len(scenes)} scenes", file=sys.stderr, flush=True)
+    return jsonify({"success": True, "job_id": job_id, "status": "running", "poll_url": f"/job-status/{job_id}"})
+
+
+def _run_slideshow_job(job_id, job_dir, scenes, audio_b64, audio_url, audio_path_direct,
+                       resolution, fps, title, subtitle_font_size, enable_ken_burns,
+                       enable_transitions, transition_duration, test_mode):
+    """バックグラウンドで動画生成を実行するメイン処理"""
+    def update_progress(msg):
+        with _jobs_lock:
+            _jobs[job_id]["progress"] = msg
+        print(f"[JOB {job_id}] {msg}", file=sys.stderr, flush=True)
 
     try:
         # 解像度をパース
@@ -1369,12 +1403,40 @@ def generate_slideshow():
         if thumbnail_path and os.path.exists(thumbnail_path):
             response_data["thumbnail_url"] = f"{base_url}/download/{os.path.basename(thumbnail_path)}"
 
-        print(f"[GENERATE-SLIDESHOW] Job {job_id} complete: {response_data['video_url']}", file=sys.stderr, flush=True)
-        return jsonify(response_data)
+        print(f"[JOB {job_id}] Complete: {response_data['video_url']}", file=sys.stderr, flush=True)
+        with _jobs_lock:
+            _jobs[job_id]["status"] = "done"
+            _jobs[job_id]["result"] = response_data
 
     except Exception as e:
-        print(f"[GENERATE-SLIDESHOW] Error: {traceback.format_exc()}", file=sys.stderr, flush=True)
-        return jsonify({"success": False, "error": str(e)}), 500
+        print(f"[JOB {job_id}] Error: {traceback.format_exc()}", file=sys.stderr, flush=True)
+        with _jobs_lock:
+            _jobs[job_id]["status"] = "error"
+            _jobs[job_id]["error"] = str(e)
     finally:
         import shutil
         shutil.rmtree(job_dir, ignore_errors=True)
+
+
+@app.route('/job-status/<job_id>', methods=['GET'])
+def job_status(job_id):
+    """非同期ジョブの進捗・完了・エラーを返す（n8nポーリング用）"""
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+    if not job:
+        return jsonify({"success": False, "error": "Job not found"}), 404
+    if job["status"] == "done":
+        return jsonify({"success": True, "status": "done", **job["result"]})
+    elif job["status"] == "error":
+        return jsonify({"success": False, "status": "error", "error": job["error"]}), 500
+    else:
+        return jsonify({"success": True, "status": "running", "progress": job.get("progress", "")})
+
+
+@app.route('/job-cancel/<job_id>', methods=['POST'])
+def job_cancel(job_id):
+    """ジョブをキャンセル（クリーンアップ用）"""
+    with _jobs_lock:
+        if job_id in _jobs:
+            del _jobs[job_id]
+    return jsonify({"success": True})

@@ -3,5 +3,5 @@ services:
     name: ffmpeg-video-server
     env: python
     buildCommand: "apt-get update && apt-get install -y ffmpeg fonts-noto-cjk && pip install -r requirements.txt"
-    startCommand: "gunicorn app:app --bind 0.0.0.0:$PORT --timeout 600 --workers 1"
+    startCommand: "gunicorn app:app --bind 0.0.0.0:$PORT --timeout 30 --workers 1 --threads 4 --worker-class gthread"
     plan: free
