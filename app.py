@@ -791,58 +791,62 @@ def create_slideshow():
 def _concat_with_xfade(clip_files, clip_durations, output_path, transition_duration, fps, job_dir):
     """
     xfadeフィルターを使ってクリップをクロスフェードで結合する。
-    複数クリップをffmpegの複合フィルターで一度に処理する。
+    メモリ節約のため2本ずつ逐次マージする方式を採用。
+    全クリップを一括処理するとメモリが512MBを超えてOOMキラーに殺されるため。
     """
+    import shutil
     n = len(clip_files)
     if n == 1:
-        import shutil
         shutil.copy(clip_files[0], output_path)
         return output_path
 
-    # xfadeフィルターを構築
-    # 各クリップのオフセット（累積時間）を計算
-    # offset[i] = sum(duration[0..i-1]) - transition_duration * i
-    # （クロスフェードでオーバーラップする分を引く）
-
-    # ffmpegコマンド：全クリップを入力として、xfadeフィルターチェーンで結合
-    cmd = ["ffmpeg", "-y"]
-
-    # 全クリップを入力
-    for cf in clip_files:
-        cmd.extend(["-i", cf])
-
-    # xfadeフィルターチェーンを構築
-    # [0][1]xfade=transition=fade:duration=0.5:offset=X[v01];
-    # [v01][2]xfade=transition=fade:duration=0.5:offset=Y[v012];
-    # ...
-
-    filter_parts = []
-    current_label = "[0:v]"
-    cumulative_offset = 0.0
+    # 2本ずつ順番にxfadeで結合する（逐次マージ）
+    # A + B → tmp1, tmp1 + C → tmp2, ... → output
+    current = clip_files[0]
+    current_duration = clip_durations[0]
+    tmp_files = []
 
     for i in range(1, n):
-        # このクリップが始まるオフセット
-        cumulative_offset += clip_durations[i-1] - transition_duration
-        next_label = f"[v{i}]" if i < n-1 else "[vout]"
+        next_clip = clip_files[i]
+        next_duration = clip_durations[i]
+        is_last = (i == n - 1)
 
-        filter_parts.append(
-            f"{current_label}[{i}:v]xfade=transition=fade:duration={transition_duration}:offset={cumulative_offset:.3f}{next_label}"
-        )
-        current_label = next_label
+        if is_last:
+            merged = output_path
+        else:
+            merged = os.path.join(job_dir, f"merged_{i:03d}.mp4")
+            tmp_files.append(merged)
 
-    filter_complex = ";".join(filter_parts)
+        offset = max(0.0, current_duration - transition_duration)
+        filter_complex = f"[0:v][1:v]xfade=transition=fade:duration={transition_duration}:offset={offset:.3f}[vout]"
 
-    cmd.extend([
-        "-filter_complex", filter_complex,
-        "-map", "[vout]",
-        "-c:v", "libx264", "-preset", "medium", "-crf", "18",
-        "-r", str(fps),
-        "-movflags", "+faststart",
-        output_path
-    ])
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", current,
+            "-i", next_clip,
+            "-filter_complex", filter_complex,
+            "-map", "[vout]",
+            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+            "-r", str(fps),
+            "-movflags", "+faststart",
+            merged
+        ]
+        print(f"[XFADE] Merging clip {i}/{n-1}: offset={offset:.3f}s", file=sys.stderr, flush=True)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        if result.returncode != 0:
+            raise Exception(f"xfade merge {i} failed: {result.stderr[-500:]}")
 
-    print(f"[SLIDESHOW] xfade command: {' '.join(cmd[:10])}...", file=sys.stderr, flush=True)
-    subprocess.run(cmd, check=True, capture_output=True, timeout=600)
+        # 前の中間ファイルを削除してメモリ・ディスクを解放
+        if current in tmp_files:
+            try:
+                os.remove(current)
+                tmp_files.remove(current)
+            except Exception:
+                pass
+
+        current = merged
+        current_duration = current_duration + next_duration - transition_duration
+
     return output_path
 
 
