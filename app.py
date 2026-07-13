@@ -1026,7 +1026,7 @@ AUDIO_DIR = "/tmp/audio_upload"
 os.makedirs(AUDIO_DIR, exist_ok=True)
 
 @app.route('/upload-audio', methods=['POST'])
-def upload_audio():
+def upload_audio_v2():
     """
     音声ファイルをアップロードしてURLを返す。
     n8nからバイナリ音声データを受け取り、サーバーに保存する。
