@@ -1017,6 +1017,61 @@ if __name__ == '__main__':
 
 
 # =============================================
+# 音声ファイルアップロードエンドポイント
+# n8nからバイナリ音声データを受け取り、サーバーに保存してURLを返す
+# これによりn8nのメモリ上に大きな音声データを保持する必要がなくなる
+# =============================================
+
+AUDIO_DIR = "/tmp/audio_upload"
+os.makedirs(AUDIO_DIR, exist_ok=True)
+
+@app.route('/upload-audio', methods=['POST'])
+def upload_audio():
+    """
+    音声ファイルをアップロードしてURLを返す。
+    n8nからバイナリ音声データを受け取り、サーバーに保存する。
+    """
+    audio_id = str(uuid.uuid4())[:8]
+    audio_filename = f"{audio_id}.mp3"
+    audio_path = os.path.join(AUDIO_DIR, audio_filename)
+
+    try:
+        # バイナリデータを受け取る
+        audio_data = request.get_data()
+        if not audio_data:
+            return jsonify({"success": False, "error": "No audio data"}), 400
+
+        with open(audio_path, 'wb') as f:
+            f.write(audio_data)
+
+        file_size = os.path.getsize(audio_path)
+        base_url = request.host_url.rstrip('/')
+        audio_url = f"{base_url}/audio/{audio_filename}"
+
+        print(f"[UPLOAD-AUDIO] Saved {audio_filename}: {file_size} bytes", file=sys.stderr, flush=True)
+
+        return jsonify({
+            "success": True,
+            "audio_url": audio_url,
+            "audio_id": audio_id,
+            "file_size": file_size
+        })
+
+    except Exception as e:
+        print(f"[UPLOAD-AUDIO] Error: {e}", file=sys.stderr, flush=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/audio/<filename>', methods=['GET'])
+def serve_audio(filename):
+    """アップロードされた音声ファイルを提供する"""
+    filepath = os.path.join(AUDIO_DIR, filename)
+    if not os.path.exists(filepath):
+        return jsonify({"error": "Audio file not found"}), 404
+    return send_file(filepath, mimetype='audio/mpeg')
+
+
+# =============================================
 # 画像生成＋スライドショー統合エンドポイント
 # n8nからシーンデータを受け取り、Flux APIで画像生成→FFmpegで動画作成まで全部サーバー側で実行
 # =============================================
@@ -1095,6 +1150,7 @@ def generate_slideshow():
 
     scenes = data.get("scenes", [])
     audio_b64 = data.get("audio_b64", "")
+    audio_url = data.get("audio_url", "")  # audio_urlも受け付ける（n8nメモリ節約）
     resolution = data.get("resolution", "1920x1080")
     fps = data.get("fps", 30)
     title = data.get("title", "")
@@ -1110,7 +1166,7 @@ def generate_slideshow():
     job_dir = os.path.join(WORK_DIR, job_id)
     os.makedirs(job_dir, exist_ok=True)
 
-    print(f"[GENERATE-SLIDESHOW] Job {job_id}: {len(scenes)} scenes", file=sys.stderr, flush=True)
+    print(f"[GENERATE-SLIDESHOW] Job {job_id}: {len(scenes)} scenes, audio_url={bool(audio_url)}, audio_b64={bool(audio_b64)}", file=sys.stderr, flush=True)
 
     try:
         # 解像度をパース
@@ -1125,6 +1181,18 @@ def generate_slideshow():
             audio_bytes = len(b64_part) * 3 // 4
             est_duration = audio_bytes / 16000
             per_scene = max(2.0, est_duration / len(scenes))
+        elif audio_url:
+            # audio_urlの場合はファイルをダウンロードしてサイズを確認
+            try:
+                head_resp = requests.head(audio_url, timeout=10)
+                content_length = int(head_resp.headers.get('content-length', 0))
+                if content_length > 0:
+                    est_duration = content_length / 16000
+                    per_scene = max(2.0, est_duration / len(scenes))
+                else:
+                    per_scene = 5.0
+            except:
+                per_scene = 5.0
         else:
             per_scene = 5.0
 
@@ -1141,7 +1209,12 @@ def generate_slideshow():
 
         # ===== Step 2: 音声ファイルを保存 =====
         audio_path = None
-        if audio_b64:
+        if audio_url:
+            # audio_urlからダウンロード（n8nメモリ節約方式）
+            audio_path = os.path.join(job_dir, "narration.mp3")
+            download_file(audio_url, audio_path)
+            print(f"[GENERATE-SLIDESHOW] Audio downloaded from URL: {os.path.getsize(audio_path)} bytes", file=sys.stderr, flush=True)
+        elif audio_b64:
             audio_path = os.path.join(job_dir, "narration.mp3")
             save_base64_audio(audio_b64, audio_path)
 
