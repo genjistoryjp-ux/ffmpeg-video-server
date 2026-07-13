@@ -1041,15 +1041,6 @@ def download(filename):
         return jsonify({"error": "File not found"}), 404
     return send_file(filepath, as_attachment=True)
 
-if __name__ == '__main__':
-    import os as _os
-    port = int(_os.environ.get('PORT', 10000))
-    print(f"Video Merge Server starting on port {port} with waitress...")
-    print("Features: Ken Burns effect, Text animation, xfade transitions")
-    from waitress import serve
-    serve(app, host='0.0.0.0', port=port, threads=8, channel_timeout=0)
-
-
 # =============================================
 # 音声ファイルアップロードエンドポイント
 # n8nからバイナリ音声データを受け取り、サーバーに保存してURLを返す
@@ -1475,3 +1466,12 @@ def job_cancel(job_id):
     if os.path.exists(p):
         os.remove(p)
     return jsonify({"success": True})
+
+
+if __name__ == '__main__':
+    import os as _os
+    port = int(_os.environ.get('PORT', 10000))
+    print(f"Video Merge Server starting on port {port} with waitress...")
+    print("Features: Ken Burns effect, Text animation, xfade transitions")
+    from waitress import serve
+    serve(app, host='0.0.0.0', port=port, threads=8, channel_timeout=0)
