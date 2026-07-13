@@ -1014,3 +1014,270 @@ if __name__ == '__main__':
     print("Video Merge Server starting on port 5555...")
     print("Features: Ken Burns effect, Text animation, xfade transitions")
     app.run(host='0.0.0.0', port=5555, debug=False)
+
+
+# =============================================
+# 画像生成＋スライドショー統合エンドポイント
+# n8nからシーンデータを受け取り、Flux APIで画像生成→FFmpegで動画作成まで全部サーバー側で実行
+# =============================================
+BFL_API_KEY = os.environ.get('BFL_API_KEY', 'bfl_LGwYiAaxche88emhqdCrl6SjeCwjNU0d')
+CHARACTER_REF_URL = os.environ.get('CHARACTER_REF_URL', 'https://files.manuscdn.com/user_upload_by_module/session_file/310519663781653791/LpZBtmedefHZdMop.png')
+
+def select_pose(image_prompt):
+    """シーンの内容に合わせてポーズを選択する"""
+    p = (image_prompt or '').lower()
+    if any(k in p for k in ['驚', '衝撃', 'びっくり', 'excited', 'surprise']):
+        return 'excited/happy pose (pose 3): arms raised, big smile'
+    elif any(k in p for k in ['考', '疑問', 'なぜ', 'think', 'wonder']):
+        return 'thinking pose (pose 2): hand on chin, thoughtful expression'
+    elif any(k in p for k in ['疲', '悲', '失敗', 'sad', 'tired']):
+        return 'tired/sad pose (pose 4): slouching, sad expression'
+    elif any(k in p for k in ['説明', '教', 'ポイント', 'point', 'teach']):
+        return 'pointing/teaching pose (pose 5): arm extended pointing, smile'
+    elif any(k in p for k in ['作業', '仕事', 'パソコン', 'work', 'desk']):
+        return 'sitting at desk pose (pose 6): working on laptop'
+    else:
+        return 'standing neutral pose (pose 1): relaxed, friendly smile'
+
+def generate_image_flux(scene_data, job_dir, index):
+    """Flux APIで1シーンの画像を生成してファイルパスを返す"""
+    image_prompt = scene_data.get('image_prompt', '')
+    pose = select_pose(image_prompt)
+    base_style = "Use the exact same stick figure character from the reference image: slim stick figure with necktie, small hair tuft, expressive round face. Pure white background, clean black ink lines only, minimal flat 2D style, no shading, no color."
+    prompt = f"{base_style} Character pose: {pose}. Scene: {image_prompt}"
+
+    print(f"[GENERATE] Scene {index}: Generating image...", file=sys.stderr, flush=True)
+
+    # Flux APIにリクエスト
+    resp = requests.post(
+        'https://api.bfl.ai/v1/flux-kontext-pro',
+        headers={'x-key': BFL_API_KEY, 'Content-Type': 'application/json'},
+        json={
+            'prompt': prompt,
+            'input_image': CHARACTER_REF_URL,
+            'aspect_ratio': '16:9',
+            'output_format': 'jpeg',
+            'safety_tolerance': 6
+        },
+        timeout=60
+    )
+    resp.raise_for_status()
+    result = resp.json()
+    polling_url = result.get('polling_url') or f"https://api.bfl.ai/v1/get_result?id={result.get('id')}"
+
+    # ポーリングで結果を取得（最大90秒）
+    for attempt in range(30):
+        time.sleep(3)
+        poll_resp = requests.get(polling_url, headers={'x-key': BFL_API_KEY}, timeout=30)
+        poll_resp.raise_for_status()
+        poll_data = poll_resp.json()
+        if poll_data.get('status') == 'Ready' and poll_data.get('result', {}).get('sample'):
+            img_url = poll_data['result']['sample']
+            img_path = os.path.join(job_dir, f"image_{index:03d}.jpg")
+            download_file(img_url, img_path)
+            print(f"[GENERATE] Scene {index}: Image ready -> {img_path}", file=sys.stderr, flush=True)
+            return img_path
+        if poll_data.get('status') in ['Error', 'Failed']:
+            raise Exception(f"Flux API error for scene {index}: {poll_data.get('status')}")
+
+    raise Exception(f"Flux API timeout for scene {index}")
+
+
+@app.route('/generate-slideshow', methods=['POST'])
+def generate_slideshow():
+    """
+    シーンデータからFlux APIで画像生成→FFmpegでスライドショー動画を作成する統合エンドポイント。
+    n8nのメモリ問題を回避するため、全処理をサーバー側で実行する。
+    """
+    data = request.get_json(force=True, silent=True)
+    if not data:
+        return jsonify({"success": False, "error": "No JSON body"}), 400
+
+    scenes = data.get("scenes", [])
+    audio_b64 = data.get("audio_b64", "")
+    resolution = data.get("resolution", "1920x1080")
+    fps = data.get("fps", 30)
+    title = data.get("title", "")
+    subtitle_font_size = data.get("subtitle_font_size", 44)
+    enable_ken_burns = data.get("enable_ken_burns", True)
+    enable_transitions = data.get("enable_transitions", True)
+    transition_duration = data.get("transition_duration", 0.5)
+
+    if not scenes:
+        return jsonify({"success": False, "error": "No scenes provided"}), 400
+
+    job_id = str(uuid.uuid4())[:8]
+    job_dir = os.path.join(WORK_DIR, job_id)
+    os.makedirs(job_dir, exist_ok=True)
+
+    print(f"[GENERATE-SLIDESHOW] Job {job_id}: {len(scenes)} scenes", file=sys.stderr, flush=True)
+
+    try:
+        # 解像度をパース
+        if 'x' in resolution:
+            width, height = map(int, resolution.split('x'))
+        else:
+            width, height = 1920, 1080
+
+        # 音声の長さを推定してシーンの尺を計算
+        if audio_b64:
+            b64_part = audio_b64.split(',')[-1]
+            audio_bytes = len(b64_part) * 3 // 4
+            est_duration = audio_bytes / 16000
+            per_scene = max(2.0, est_duration / len(scenes))
+        else:
+            per_scene = 5.0
+
+        # ===== Step 1: 画像を1枚ずつ生成（直列処理でメモリ節約） =====
+        images_data = []
+        for i, scene in enumerate(scenes):
+            img_path = generate_image_flux(scene, job_dir, i)
+            images_data.append({
+                "path": img_path,
+                "duration": round(per_scene, 1),
+                "subtitle": scene.get("subtitle", ""),
+                "keyword": scene.get("keyword", "")
+            })
+
+        # ===== Step 2: 音声ファイルを保存 =====
+        audio_path = None
+        if audio_b64:
+            audio_path = os.path.join(job_dir, "narration.mp3")
+            save_base64_audio(audio_b64, audio_path)
+
+        # ===== Step 3: FFmpegでスライドショー動画を作成 =====
+        kb_patterns = ['zoom_in', 'pan_right', 'zoom_out', 'pan_left', 'zoom_in', 'pan_right',
+                       'zoom_out', 'pan_left', 'zoom_in', 'pan_right', 'zoom_out', 'pan_left',
+                       'zoom_in', 'pan_right', 'zoom_out', 'pan_left', 'zoom_in', 'pan_right',
+                       'zoom_out', 'pan_left', 'zoom_in', 'pan_right', 'zoom_out', 'pan_left']
+
+        clip_files = []
+        clip_durations = []
+
+        for i, img_data in enumerate(images_data):
+            duration = img_data["duration"]
+            img_path = img_data["path"]
+            subtitle_text = img_data.get("subtitle", "")
+            keyword_text = img_data.get("keyword", "")
+            clip_path = os.path.join(job_dir, f"clip_{i:03d}.mp4")
+
+            if enable_ken_burns:
+                kb_type = kb_patterns[i % len(kb_patterns)]
+                kb_filter, used_effect = get_ken_burns_filter(width, height, duration, kb_type, fps)
+                vf_parts = [
+                    f"scale={width}:{height}:force_original_aspect_ratio=decrease:flags=lanczos",
+                    f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=white",
+                    kb_filter,
+                    "format=yuv420p"
+                ]
+            else:
+                vf_parts = [
+                    f"scale={width}:{height}:force_original_aspect_ratio=decrease",
+                    f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=white",
+                    "format=yuv420p"
+                ]
+
+            if subtitle_text:
+                wrapped = wrap_text(subtitle_text, max_chars=18)
+                lines = wrapped.split('\n')
+                sub_font_size = subtitle_font_size + 8
+                y_base = height - 180
+                for line_idx, line in enumerate(lines[:2]):
+                    escaped = escape_ffmpeg_text(line)
+                    if not escaped:
+                        continue
+                    y_pos = y_base + line_idx * (sub_font_size + 10)
+                    fade_in = f"if(lt(t,0.3),0,if(lt(t,0.8),255*(t-0.3)/0.5,255))"
+                    vf_parts.append(
+                        f"drawtext=fontfile={FONT_PATH}:text='{escaped}':fontsize={sub_font_size}:fontcolor=black:alpha='({fade_in})/255':x=(w-text_w)/2:y={y_pos}:borderw=3:bordercolor=white"
+                    )
+
+            if keyword_text:
+                escaped_kw = escape_ffmpeg_text(keyword_text)
+                if escaped_kw:
+                    kw_font_size = 72
+                    vf_parts.append(
+                        f"drawtext=fontfile={FONT_PATH}:text='{escaped_kw}':fontsize={kw_font_size}:fontcolor=black:alpha='if(lt(t,0.2),0,if(lt(t,0.7),255*(t-0.2)/0.5,255))/255':x=(w-text_w)/2:y=(h-text_h)/2-80:borderw=4:bordercolor=white"
+                    )
+
+            vf_str = ",".join(vf_parts)
+            cmd = [
+                "ffmpeg", "-y",
+                "-loop", "1", "-i", img_path,
+                "-t", str(duration),
+                "-vf", vf_str,
+                "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                "-r", str(fps),
+                clip_path
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            if result.returncode != 0:
+                raise Exception(f"FFmpeg clip {i} failed: {result.stderr[-500:]}")
+            clip_files.append(clip_path)
+            clip_durations.append(duration)
+
+        # クリップを結合
+        output_filename = f"{job_id}.mp4"
+        output_path = os.path.join(OUTPUT_DIR, output_filename)
+
+        if enable_transitions and len(clip_files) > 1:
+            final_video = _concat_with_xfade(clip_files, clip_durations, output_path, transition_duration, fps, job_dir)
+        else:
+            concat_list = os.path.join(job_dir, "concat.txt")
+            with open(concat_list, 'w') as f:
+                for cf in clip_files:
+                    f.write(f"file '{cf}'\n")
+            cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_list,
+                   "-c", "copy", output_path]
+            subprocess.run(cmd, capture_output=True, check=True, timeout=300)
+            final_video = output_path
+
+        # 音声を合成
+        if audio_path and os.path.exists(audio_path):
+            final_with_audio = os.path.join(OUTPUT_DIR, f"{job_id}_final.mp4")
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", final_video,
+                "-i", audio_path,
+                "-c:v", "copy",
+                "-c:a", "aac", "-b:a", "192k",
+                "-shortest",
+                final_with_audio
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            if result.returncode == 0:
+                os.rename(final_with_audio, final_video)
+
+        # サムネイル生成（1シーン目の画像を使用）
+        thumbnail_path = None
+        if images_data and title:
+            try:
+                thumb_src = images_data[0]["path"]
+                thumbnail_path = os.path.join(OUTPUT_DIR, f"{job_id}_thumb.jpg")
+                cmd = ["ffmpeg", "-y", "-i", thumb_src, "-vframes", "1",
+                       "-vf", f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=white",
+                       thumbnail_path]
+                subprocess.run(cmd, capture_output=True, timeout=30)
+            except Exception as e:
+                print(f"[GENERATE-SLIDESHOW] Thumbnail error: {e}", file=sys.stderr, flush=True)
+
+        base_url = request.host_url.rstrip('/')
+        response_data = {
+            "success": True,
+            "job_id": job_id,
+            "video_url": f"{base_url}/download/{os.path.basename(final_video)}",
+            "filename": os.path.basename(final_video),
+            "scenes_count": len(scenes)
+        }
+        if thumbnail_path and os.path.exists(thumbnail_path):
+            response_data["thumbnail_url"] = f"{base_url}/download/{os.path.basename(thumbnail_path)}"
+
+        print(f"[GENERATE-SLIDESHOW] Job {job_id} complete: {response_data['video_url']}", file=sys.stderr, flush=True)
+        return jsonify(response_data)
+
+    except Exception as e:
+        print(f"[GENERATE-SLIDESHOW] Error: {traceback.format_exc()}", file=sys.stderr, flush=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+    finally:
+        import shutil
+        shutil.rmtree(job_dir, ignore_errors=True)
