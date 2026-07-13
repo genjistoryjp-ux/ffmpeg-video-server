@@ -1160,6 +1160,7 @@ def generate_slideshow():
     enable_ken_burns = data.get("enable_ken_burns", True)
     enable_transitions = data.get("enable_transitions", True)
     transition_duration = data.get("transition_duration", 0.5)
+    test_mode = data.get("test_mode", False)  # テストモード: Flux APIをスキップしてダミー画像を使用
 
     if not scenes:
         return jsonify({"success": False, "error": "No scenes provided"}), 400
@@ -1206,7 +1207,19 @@ def generate_slideshow():
         # ===== Step 1: 画像を1枚ずつ生成（直列処理でメモリ節約） =====
         images_data = []
         for i, scene in enumerate(scenes):
-            img_path = generate_image_flux(scene, job_dir, i)
+            if test_mode:
+                # テストモード: Flux APIをスキップしてダミー画像を生成（クレジット節約）
+                img_path = os.path.join(job_dir, f"image_{i:03d}.jpg")
+                from PIL import Image, ImageDraw, ImageFont
+                img = Image.new('RGB', (1920, 1080), color=(240, 240, 240))
+                draw = ImageDraw.Draw(img)
+                draw.rectangle([0, 0, 1920, 1080], fill=(200, 220, 240))
+                text = f"[TEST] Scene {i+1}\n{scene.get('subtitle', '')[:40]}"
+                draw.text((960, 540), text, fill=(50, 50, 50), anchor='mm')
+                img.save(img_path, 'JPEG', quality=85)
+                print(f"[TEST] Scene {i}: Dummy image created -> {img_path}", file=sys.stderr, flush=True)
+            else:
+                img_path = generate_image_flux(scene, job_dir, i)
             images_data.append({
                 "path": img_path,
                 "duration": round(per_scene, 1),
