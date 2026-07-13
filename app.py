@@ -1053,6 +1053,7 @@ def upload_audio_v2():
         return jsonify({
             "success": True,
             "audio_url": audio_url,
+            "audio_path": audio_path,  # サーバー内パス（自己参照ループ回避）
             "audio_id": audio_id,
             "file_size": file_size
         })
@@ -1151,6 +1152,7 @@ def generate_slideshow():
     scenes = data.get("scenes", [])
     audio_b64 = data.get("audio_b64", "")
     audio_url = data.get("audio_url", "")  # audio_urlも受け付ける（n8nメモリ節約）
+    audio_path_direct = data.get("audio_path", "")  # サーバー内パス（自己参照ループ回避）
     resolution = data.get("resolution", "1920x1080")
     fps = data.get("fps", 30)
     title = data.get("title", "")
@@ -1176,7 +1178,12 @@ def generate_slideshow():
             width, height = 1920, 1080
 
         # 音声の長さを推定してシーンの尺を計算
-        if audio_b64:
+        if audio_path_direct and os.path.exists(audio_path_direct):
+            # サーバー内パスから直接ファイルサイズを取得
+            file_size_bytes = os.path.getsize(audio_path_direct)
+            est_duration = file_size_bytes / 16000
+            per_scene = max(2.0, est_duration / len(scenes))
+        elif audio_b64:
             b64_part = audio_b64.split(',')[-1]
             audio_bytes = len(b64_part) * 3 // 4
             est_duration = audio_bytes / 16000
@@ -1209,7 +1216,11 @@ def generate_slideshow():
 
         # ===== Step 2: 音声ファイルを保存 =====
         audio_path = None
-        if audio_url:
+        if audio_path_direct and os.path.exists(audio_path_direct):
+            # サーバー内パスを直接使用（自己参照ループ回避）
+            audio_path = audio_path_direct
+            print(f"[GENERATE-SLIDESHOW] Using audio from path: {audio_path} ({os.path.getsize(audio_path)} bytes)", file=sys.stderr, flush=True)
+        elif audio_url:
             # audio_urlからダウンロード（n8nメモリ節約方式）
             audio_path = os.path.join(job_dir, "narration.mp3")
             download_file(audio_url, audio_path)
