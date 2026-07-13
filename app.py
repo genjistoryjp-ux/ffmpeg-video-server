@@ -58,11 +58,14 @@ def cleanup_old_files():
     while True:
         time.sleep(3600)
         now = time.time()
-        for d in [WORK_DIR, OUTPUT_DIR]:
-            for f in os.listdir(d):
-                fpath = os.path.join(d, f)
-                if os.path.isfile(fpath) and now - os.path.getmtime(fpath) > 7200:
-                    os.remove(fpath)
+        for d in [WORK_DIR, OUTPUT_DIR, JOBS_DIR]:
+            try:
+                for f in os.listdir(d):
+                    fpath = os.path.join(d, f)
+                    if os.path.isfile(fpath) and now - os.path.getmtime(fpath) > 7200:
+                        os.remove(fpath)
+            except Exception:
+                pass
 
 threading.Thread(target=cleanup_old_files, daemon=True).start()
 
@@ -1145,8 +1148,8 @@ def generate_image_flux(scene_data, job_dir, index):
     result = resp.json()
     polling_url = result.get('polling_url') or f"https://api.bfl.ai/v1/get_result?id={result.get('id')}"
 
-    # ポーリングで結果を取得（最大90秒）
-    for attempt in range(30):
+    # ポーリングで結果を取得（最大180秒）
+    for attempt in range(60):
         time.sleep(3)
         poll_resp = requests.get(polling_url, headers={'x-key': BFL_API_KEY}, timeout=30)
         poll_resp.raise_for_status()
@@ -1402,6 +1405,8 @@ def _run_slideshow_job(job_id, job_dir, scenes, audio_b64, audio_url, audio_path
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
             if result.returncode == 0:
                 os.rename(final_with_audio, final_video)
+            else:
+                print(f"[JOB {job_id}] Audio merge warning (non-fatal): {result.stderr[-300:]}", file=sys.stderr, flush=True)
 
         # サムネイル生成（1シーン目の画像を使用）
         thumbnail_path = None
