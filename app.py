@@ -31,9 +31,28 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 FONT_PATH = "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"
 FONT_PATH_REGULAR = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
 
-# 非同期ジョブ管理（Render.comの30分タイムアウト回避）
-_jobs = {}  # job_id -> {"status": "pending"|"running"|"done"|"error", "result": {...}, "error": str}
+# 非同期ジョブ管理（ファイルベース: Render.comのワーカー再起動後も状態を維持）
+JOBS_DIR = "/tmp/video_jobs"
+os.makedirs(JOBS_DIR, exist_ok=True)
 _jobs_lock = threading.Lock()
+
+def _job_path(job_id):
+    return os.path.join(JOBS_DIR, f"{job_id}.json")
+
+def _save_job(job_id, data):
+    with _jobs_lock:
+        with open(_job_path(job_id), 'w') as f:
+            json.dump(data, f)
+
+def _load_job(job_id):
+    p = _job_path(job_id)
+    if not os.path.exists(p):
+        return None
+    try:
+        with open(p, 'r') as f:
+            return json.load(f)
+    except Exception:
+        return None
 
 def cleanup_old_files():
     while True:
@@ -1175,8 +1194,7 @@ def generate_slideshow():
     os.makedirs(job_dir, exist_ok=True)
 
     # ジョブを登録してバックグラウンドスレッドで実行開始
-    with _jobs_lock:
-        _jobs[job_id] = {"status": "running", "result": None, "error": None, "progress": "starting"}
+    _save_job(job_id, {"status": "running", "result": None, "error": None, "progress": "starting"})
 
     def run_job():
         try:
@@ -1184,9 +1202,10 @@ def generate_slideshow():
                                resolution, fps, title, subtitle_font_size, enable_ken_burns,
                                enable_transitions, transition_duration, test_mode)
         except Exception as e:
-            with _jobs_lock:
-                _jobs[job_id]["status"] = "error"
-                _jobs[job_id]["error"] = str(e)
+            job = _load_job(job_id) or {}
+            job["status"] = "error"
+            job["error"] = str(e)
+            _save_job(job_id, job)
             print(f"[JOB {job_id}] Unhandled error: {traceback.format_exc()}", file=sys.stderr, flush=True)
 
     t = threading.Thread(target=run_job, daemon=True)
@@ -1201,8 +1220,9 @@ def _run_slideshow_job(job_id, job_dir, scenes, audio_b64, audio_url, audio_path
                        enable_transitions, transition_duration, test_mode):
     """バックグラウンドで動画生成を実行するメイン処理"""
     def update_progress(msg):
-        with _jobs_lock:
-            _jobs[job_id]["progress"] = msg
+        job = _load_job(job_id) or {}
+        job["progress"] = msg
+        _save_job(job_id, job)
         print(f"[JOB {job_id}] {msg}", file=sys.stderr, flush=True)
 
     try:
@@ -1404,15 +1424,14 @@ def _run_slideshow_job(job_id, job_dir, scenes, audio_b64, audio_url, audio_path
             response_data["thumbnail_url"] = f"{base_url}/download/{os.path.basename(thumbnail_path)}"
 
         print(f"[JOB {job_id}] Complete: {response_data['video_url']}", file=sys.stderr, flush=True)
-        with _jobs_lock:
-            _jobs[job_id]["status"] = "done"
-            _jobs[job_id]["result"] = response_data
+        _save_job(job_id, {"status": "done", "result": response_data})
 
     except Exception as e:
         print(f"[JOB {job_id}] Error: {traceback.format_exc()}", file=sys.stderr, flush=True)
-        with _jobs_lock:
-            _jobs[job_id]["status"] = "error"
-            _jobs[job_id]["error"] = str(e)
+        job = _load_job(job_id) or {}
+        job["status"] = "error"
+        job["error"] = str(e)
+        _save_job(job_id, job)
     finally:
         import shutil
         shutil.rmtree(job_dir, ignore_errors=True)
@@ -1421,8 +1440,7 @@ def _run_slideshow_job(job_id, job_dir, scenes, audio_b64, audio_url, audio_path
 @app.route('/job-status/<job_id>', methods=['GET'])
 def job_status(job_id):
     """非同期ジョブの進捗・完了・エラーを返す（n8nポーリング用）"""
-    with _jobs_lock:
-        job = _jobs.get(job_id)
+    job = _load_job(job_id)
     if not job:
         return jsonify({"success": False, "error": "Job not found"}), 404
     if job["status"] == "done":
@@ -1436,7 +1454,7 @@ def job_status(job_id):
 @app.route('/job-cancel/<job_id>', methods=['POST'])
 def job_cancel(job_id):
     """ジョブをキャンセル（クリーンアップ用）"""
-    with _jobs_lock:
-        if job_id in _jobs:
-            del _jobs[job_id]
+    p = _job_path(job_id)
+    if os.path.exists(p):
+        os.remove(p)
     return jsonify({"success": True})
