@@ -1450,14 +1450,29 @@ def _run_slideshow_job(job_id, job_dir, scenes, audio_b64, audio_url, audio_path
         # 音声を合成
         if audio_path and os.path.exists(audio_path):
             final_with_audio = os.path.join(OUTPUT_DIR, f"{job_id}_final.mp4")
+            # 音声を一度PCMに変換してからAACエンコード（EOF before openエラー回避）
+            audio_converted = os.path.join(job_dir, "narration_converted.aac")
+            cmd_convert = [
+                "ffmpeg", "-y",
+                "-i", audio_path,
+                "-ar", "44100", "-ac", "2",
+                "-c:a", "aac", "-b:a", "192k",
+                audio_converted
+            ]
+            conv_result = subprocess.run(cmd_convert, capture_output=True, text=True, timeout=60)
+            if conv_result.returncode != 0:
+                print(f"[JOB {job_id}] Audio convert FAILED: {conv_result.stderr[-300:]}", file=sys.stderr, flush=True)
+                audio_converted = audio_path  # 変換失敗時は元ファイルを使用
+            else:
+                print(f"[JOB {job_id}] Audio converted to AAC: {audio_converted}", file=sys.stderr, flush=True)
             cmd = [
                 "ffmpeg", "-y",
                 "-i", final_video,
-                "-i", audio_path,
+                "-i", audio_converted,
                 "-map", "0:v:0",
                 "-map", "1:a:0",
                 "-c:v", "copy",
-                "-c:a", "aac", "-b:a", "192k",
+                "-c:a", "copy",
                 "-shortest",
                 final_with_audio
             ]
