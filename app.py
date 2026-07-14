@@ -1218,28 +1218,107 @@ def select_pose_file(scene_data):
     return None
 
 
+def generate_flux_image(pose_path, scene_data, index):
+    """
+    ローカルのポーズ画像をベースにFlux Kontext img2imgで背景付き画像を生成して返す。
+    成功時は生成画像のURLを返す。失敗時はNoneを返す（呼び出し元でフォールバック）。
+    """
+    import base64, time
+
+    bfl_api_key = os.environ.get('BFL_API_KEY', '').strip()
+    if not bfl_api_key:
+        print(f"[FLUX] Scene {index}: BFL_API_KEY not set, skipping Flux generation", file=sys.stderr, flush=True)
+        return None
+
+    # ポーズ画像をBase64エンコード
+    try:
+        with open(pose_path, 'rb') as f:
+            img_b64 = base64.b64encode(f.read()).decode()
+    except Exception as e:
+        print(f"[FLUX] Scene {index}: Failed to read pose image ({e})", file=sys.stderr, flush=True)
+        return None
+
+    # シーン内容からプロンプトを生成
+    image_prompt = scene_data.get('image_prompt', '')
+    subtitle = scene_data.get('subtitle', '')
+    keyword = scene_data.get('keyword', '')
+    scene_context = ' '.join(filter(None, [image_prompt, subtitle, keyword]))[:200]
+
+    prompt = (
+        f"Keep this exact stick figure character with the same pose and proportions. "
+        f"Add a vivid, detailed background and environment that matches this scene: {scene_context}. "
+        f"Maintain the black line art stick figure style. Make the background colorful and expressive "
+        f"to enhance the visual storytelling. High quality illustration style."
+    )
+
+    headers = {
+        'x-key': bfl_api_key,
+        'Content-Type': 'application/json',
+    }
+    payload = {
+        'prompt': prompt,
+        'input_image': img_b64,
+        'aspect_ratio': '16:9',
+        'output_format': 'jpeg',
+        'safety_tolerance': 6,
+    }
+
+    try:
+        print(f"[FLUX] Scene {index}: Submitting job to BFL API...", file=sys.stderr, flush=True)
+        resp = requests.post(
+            'https://api.bfl.ml/v1/flux-kontext-pro',
+            headers=headers,
+            json=payload,
+            timeout=30
+        )
+        if resp.status_code != 200:
+            print(f"[FLUX] Scene {index}: BFL API error {resp.status_code}: {resp.text[:200]}", file=sys.stderr, flush=True)
+            return None
+
+        result = resp.json()
+        job_id_bfl = result.get('id')
+        if not job_id_bfl:
+            print(f"[FLUX] Scene {index}: No job ID returned", file=sys.stderr, flush=True)
+            return None
+
+        print(f"[FLUX] Scene {index}: Job submitted, polling... (id={job_id_bfl})", file=sys.stderr, flush=True)
+
+        # ポーリング（最大120秒、3秒間隔）
+        for attempt in range(40):
+            time.sleep(3)
+            poll_resp = requests.get(
+                f'https://api.bfl.ml/v1/get_result?id={job_id_bfl}',
+                headers={'x-key': bfl_api_key},
+                timeout=15
+            )
+            poll_data = poll_resp.json()
+            status = poll_data.get('status')
+            if status == 'Ready':
+                image_url = poll_data.get('result', {}).get('sample')
+                print(f"[FLUX] Scene {index}: Image ready -> {str(image_url)[:80]}", file=sys.stderr, flush=True)
+                return image_url
+            elif status in ['Error', 'Failed', 'Content Moderated']:
+                print(f"[FLUX] Scene {index}: Generation failed: {status}", file=sys.stderr, flush=True)
+                return None
+            elif attempt % 5 == 0:
+                print(f"[FLUX] Scene {index}: Still waiting... status={status} (attempt {attempt+1}/40)", file=sys.stderr, flush=True)
+
+        print(f"[FLUX] Scene {index}: Timeout waiting for image", file=sys.stderr, flush=True)
+        return None
+
+    except Exception as e:
+        print(f"[FLUX] Scene {index}: Exception during generation: {e}", file=sys.stderr, flush=True)
+        return None
+
+
 def generate_image_local(scene_data, job_dir, index):
     """画像を取得してファイルパスを返す。
-    scene_dataにimage_urlがある場合はそのURLからダウンロード（Flux Kontextで生成済み）。
-    なければ事前生成済みポーズ画像をローカルから選択してコピー。
+    1. まずローカルポーズ画像を選択する
+    2. BFL_API_KEYが設定されていればFlux Kontextでimg2img生成（背景追加）
+    3. Flux生成に失敗した場合はローカルポーズ画像をそのまま使用
     """
     import shutil
     img_path = os.path.join(job_dir, f"image_{index:03d}.jpg")
-
-    # 外部image_urlがある場合はダウンロードして使用（n8nでFlux Kontextが生成した画像）
-    image_url = scene_data.get('image_url', '')
-    if image_url:
-        try:
-            print(f"[IMG2IMG] Scene {index}: Downloading from {image_url[:80]}...", file=sys.stderr, flush=True)
-            resp = requests.get(image_url, timeout=60)
-            resp.raise_for_status()
-            with open(img_path, 'wb') as f:
-                f.write(resp.content)
-            print(f"[IMG2IMG] Scene {index}: Downloaded {len(resp.content)} bytes", file=sys.stderr, flush=True)
-            return img_path
-        except Exception as e:
-            print(f"[IMG2IMG] Scene {index}: Download failed ({e}), falling back to local pose", file=sys.stderr, flush=True)
-            # フォールバック: ローカルポーズ画像を使用
 
     # ローカルポーズ画像を選択
     pose_path = select_pose_file(scene_data)
@@ -1253,8 +1332,25 @@ def generate_image_local(scene_data, job_dir, index):
         print(f"[LOCAL] Scene {index}: Fallback dummy image", file=sys.stderr, flush=True)
         return img_path
 
+    print(f"[LOCAL] Scene {index}: Selected pose '{os.path.basename(pose_path)}'", file=sys.stderr, flush=True)
+
+    # Flux Kontextでimg2img生成を試みる
+    flux_url = generate_flux_image(pose_path, scene_data, index)
+    if flux_url:
+        # Flux生成画像をダウンロード
+        try:
+            resp = requests.get(flux_url, timeout=60)
+            resp.raise_for_status()
+            with open(img_path, 'wb') as f:
+                f.write(resp.content)
+            print(f"[FLUX] Scene {index}: Saved generated image ({len(resp.content)} bytes)", file=sys.stderr, flush=True)
+            return img_path
+        except Exception as e:
+            print(f"[FLUX] Scene {index}: Download failed ({e}), falling back to local pose", file=sys.stderr, flush=True)
+
+    # フォールバック: ローカルポーズ画像をそのまま使用
     shutil.copy2(pose_path, img_path)
-    print(f"[LOCAL] Scene {index}: Using pose '{os.path.basename(pose_path)}'", file=sys.stderr, flush=True)
+    print(f"[LOCAL] Scene {index}: Using pose '{os.path.basename(pose_path)}' (Flux skipped/failed)", file=sys.stderr, flush=True)
     return img_path
 
 
