@@ -1244,14 +1244,15 @@ def generate_flux_image(pose_path, scene_data, index):
     keyword = scene_data.get('keyword', '')
     scene_context = ' '.join(filter(None, [image_prompt, subtitle, keyword]))[:200]
 
-    # 強力な白黒線画保持プロンプト
+    # ミニマリズム・抽象図解スタイルへの刷新
     prompt = (
-        f"A simple black-and-white line art stick figure character. "
-        f"STRICTLY PRESERVE the character: keep it as a pure 2D black-and-white line drawing with NO COLOR. "
-        f"ONLY add a professional background scene BEHIND the character that matches: {scene_context}. "
-        f"The character must remain exactly as black ink lines on a white body, flat 2D style. "
-        f"Background should be a sophisticated, slightly muted illustration style. "
-        f"DO NOT add any color or shading to the stick figure itself. Character = Black and White ONLY."
+        f"A minimalist, ultra-clean professional diagrammatic illustration. "
+        f"Subject: A simple black line art stick figure (thin strokes) in the center. "
+        f"Background: Pure white background with vast empty space. "
+        f"Environment: Do NOT draw a realistic background. Instead, use minimal abstract geometric shapes, simple logical diagrams, or thin-lined icons that symbolize '{scene_context}'. "
+        f"Style: Concept art, diagrammatic, architectural blueprint aesthetic, thin black lines only. "
+        f"Constraint: Use 90% white space. No shading, no gradients, no realistic textures. "
+        f"Everything must look like a smart, hand-drawn sketch on a whiteboard."
     )
 
     headers = {
