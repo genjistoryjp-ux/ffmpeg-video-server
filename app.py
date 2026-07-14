@@ -1266,7 +1266,7 @@ def generate_flux_image(pose_path, scene_data, index):
     try:
         print(f"[FLUX] Scene {index}: Submitting job to BFL API...", file=sys.stderr, flush=True)
         resp = requests.post(
-            'https://api.bfl.ml/v1/flux-kontext-pro',
+            'https://api.bfl.ai/v1/flux-kontext-pro',
             headers=headers,
             json=payload,
             timeout=30
@@ -1277,6 +1277,8 @@ def generate_flux_image(pose_path, scene_data, index):
 
         result = resp.json()
         job_id_bfl = result.get('id')
+        # polling_urlが返ってきた場合はそちらを優先使用（eu2クラスターなど）
+        polling_url = result.get('polling_url') or f'https://api.bfl.ai/v1/get_result?id={job_id_bfl}'
         if not job_id_bfl:
             print(f"[FLUX] Scene {index}: No job ID returned", file=sys.stderr, flush=True)
             return None
@@ -1287,7 +1289,7 @@ def generate_flux_image(pose_path, scene_data, index):
         for attempt in range(40):
             time.sleep(3)
             poll_resp = requests.get(
-                f'https://api.bfl.ml/v1/get_result?id={job_id_bfl}',
+                polling_url,
                 headers={'x-key': bfl_api_key},
                 timeout=15
             )
@@ -1732,7 +1734,7 @@ def test_kontext():
 
     try:
         resp = _req.post(
-            "https://api.bfl.ml/v1/flux-kontext-pro",
+            "https://api.bfl.ai/v1/flux-kontext-pro",
             headers=headers,
             json=payload,
             timeout=30
@@ -1742,6 +1744,8 @@ def test_kontext():
 
         result = resp.json()
         job_id_bfl = result.get("id")
+        # polling_urlが返ってきた場合はそちらを優先使用（eu2クラスターなど）
+        polling_url_bfl = result.get("polling_url") or f"https://api.bfl.ai/v1/get_result?id={job_id_bfl}"
         if not job_id_bfl:
             return jsonify({"success": False, "error": "No job ID returned"}), 500
 
@@ -1749,7 +1753,7 @@ def test_kontext():
         for _ in range(30):
             time.sleep(3)
             poll_resp = _req.get(
-                f"https://api.bfl.ml/v1/get_result?id={job_id_bfl}",
+                polling_url_bfl,
                 headers={"x-key": bfl_api_key},
                 timeout=15
             )
