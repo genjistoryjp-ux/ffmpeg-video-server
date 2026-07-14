@@ -1244,13 +1244,14 @@ def generate_flux_image(pose_path, scene_data, index):
     keyword = scene_data.get('keyword', '')
     scene_context = ' '.join(filter(None, [image_prompt, subtitle, keyword]))[:200]
 
+    # 強力な白黒線画保持プロンプト
     prompt = (
-        f"This image contains a simple black line art stick figure on a white background. "
-        f"DO NOT change the stick figure at all - keep it exactly as a simple black line drawing. "
-        f"ONLY add a background scene behind the stick figure that matches: {scene_context}. "
-        f"The stick figure must remain as a flat 2D black line art drawing with white fill. "
-        f"Add a colorful illustrated background environment only. "
-        f"The character style must stay as simple black line art stick figure, not 3D, not colored, not realistic."
+        f"A simple black-and-white line art stick figure character. "
+        f"STRICTLY PRESERVE the character: keep it as a pure 2D black-and-white line drawing with NO COLOR. "
+        f"ONLY add a professional background scene BEHIND the character that matches: {scene_context}. "
+        f"The character must remain exactly as black ink lines on a white body, flat 2D style. "
+        f"Background should be a sophisticated, slightly muted illustration style. "
+        f"DO NOT add any color or shading to the stick figure itself. Character = Black and White ONLY."
     )
 
     headers = {
