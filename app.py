@@ -1066,6 +1066,20 @@ def upload_audio_v2():
         if not audio_data:
             return jsonify({"success": False, "error": "No audio data"}), 400
 
+        # Base64エンコードされたデータかどうかを検出してデコード
+        import base64
+        try:
+            # 先頭バイトがASCII文字（Base64）かどうか確認
+            sample = audio_data[:100].strip()
+            if all(c in b'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=\n\r ' for c in sample):
+                decoded = base64.b64decode(audio_data.strip())
+                # デコード後がMP3ヘッダー(ID3 or 0xFF 0xFB)かチェック
+                if decoded[:3] == b'ID3' or (decoded[0] == 0xFF and decoded[1] & 0xE0 == 0xE0):
+                    audio_data = decoded
+                    print(f"[UPLOAD-AUDIO] Base64 detected and decoded: {len(audio_data)} bytes", file=sys.stderr, flush=True)
+        except Exception:
+            pass  # デコード失敗時はそのまま使用
+
         with open(audio_path, 'wb') as f:
             f.write(audio_data)
 
@@ -1124,7 +1138,7 @@ def generate_image_flux(scene_data, job_dir, index):
     """Flux APIで1シーンの画像を生成してファイルパスを返す"""
     image_prompt = scene_data.get('image_prompt', '')
     pose = select_pose(image_prompt)
-    base_style = "Use the exact same stick figure character from the reference image: slim stick figure with necktie, small hair tuft, expressive round face. Pure white background, clean black ink lines only, minimal flat 2D style, no shading, no color."
+    base_style = "Use the exact same stick figure character from the reference image: slim stick figure with necktie, small hair tuft, expressive round face. PURE WHITE BACKGROUND (#FFFFFF), solid white background only, NO dark background, NO black background, NO gray background. Black ink stick figure on white background. Clean black ink lines only, minimal flat 2D style, no shading, no color fills, white background is mandatory."
     prompt = f"{base_style} Character pose: {pose}. Scene: {image_prompt}"
 
     print(f"[GENERATE] Scene {index}: Generating image...", file=sys.stderr, flush=True)
@@ -1396,6 +1410,8 @@ def _run_slideshow_job(job_id, job_dir, scenes, audio_b64, audio_url, audio_path
                 "ffmpeg", "-y",
                 "-i", final_video,
                 "-i", audio_path,
+                "-map", "0:v:0",
+                "-map", "1:a:0",
                 "-c:v", "copy",
                 "-c:a", "aac", "-b:a", "192k",
                 "-shortest",
@@ -1404,8 +1420,9 @@ def _run_slideshow_job(job_id, job_dir, scenes, audio_b64, audio_url, audio_path
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
             if result.returncode == 0:
                 os.rename(final_with_audio, final_video)
+                print(f"[JOB {job_id}] Audio merge success: {final_video}", file=sys.stderr, flush=True)
             else:
-                print(f"[JOB {job_id}] Audio merge warning (non-fatal): {result.stderr[-300:]}", file=sys.stderr, flush=True)
+                print(f"[JOB {job_id}] Audio merge FAILED: {result.stderr[-500:]}", file=sys.stderr, flush=True)
 
         # サムネイル生成（1シーン目の画像を使用）
         thumbnail_path = None
