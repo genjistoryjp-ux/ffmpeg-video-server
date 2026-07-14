@@ -1219,8 +1219,29 @@ def select_pose_file(scene_data):
 
 
 def generate_image_local(scene_data, job_dir, index):
-    """事前生成済みポーズ画像を選択してコピーし、ファイルパスを返す（Flux API不使用）"""
+    """画像を取得してファイルパスを返す。
+    scene_dataにimage_urlがある場合はそのURLからダウンロード（Flux Kontextで生成済み）。
+    なければ事前生成済みポーズ画像をローカルから選択してコピー。
+    """
     import shutil
+    img_path = os.path.join(job_dir, f"image_{index:03d}.jpg")
+
+    # 外部image_urlがある場合はダウンロードして使用（n8nでFlux Kontextが生成した画像）
+    image_url = scene_data.get('image_url', '')
+    if image_url:
+        try:
+            print(f"[IMG2IMG] Scene {index}: Downloading from {image_url[:80]}...", file=sys.stderr, flush=True)
+            resp = requests.get(image_url, timeout=60)
+            resp.raise_for_status()
+            with open(img_path, 'wb') as f:
+                f.write(resp.content)
+            print(f"[IMG2IMG] Scene {index}: Downloaded {len(resp.content)} bytes", file=sys.stderr, flush=True)
+            return img_path
+        except Exception as e:
+            print(f"[IMG2IMG] Scene {index}: Download failed ({e}), falling back to local pose", file=sys.stderr, flush=True)
+            # フォールバック: ローカルポーズ画像を使用
+
+    # ローカルポーズ画像を選択
     pose_path = select_pose_file(scene_data)
     if not pose_path or not os.path.exists(pose_path):
         # フォールバック: グレー背景のダミー画像を生成
@@ -1228,12 +1249,10 @@ def generate_image_local(scene_data, job_dir, index):
         img = PILImage.new('RGB', (1080, 1080), color=(240, 240, 240))
         draw = ImageDraw.Draw(img)
         draw.text((540, 540), f"Scene {index+1}", fill=(100, 100, 100), anchor='mm')
-        img_path = os.path.join(job_dir, f"image_{index:03d}.jpg")
         img.save(img_path, 'JPEG', quality=85)
         print(f"[LOCAL] Scene {index}: Fallback dummy image", file=sys.stderr, flush=True)
         return img_path
 
-    img_path = os.path.join(job_dir, f"image_{index:03d}.jpg")
     shutil.copy2(pose_path, img_path)
     print(f"[LOCAL] Scene {index}: Using pose '{os.path.basename(pose_path)}'", file=sys.stderr, flush=True)
     return img_path
