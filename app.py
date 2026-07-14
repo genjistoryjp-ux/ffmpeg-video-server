@@ -1066,17 +1066,30 @@ def upload_audio_v2():
         if not audio_data:
             return jsonify({"success": False, "error": "No audio data"}), 400
 
-        # Base64エンコードされたデータかどうかを検出してデコード
+        # データ形式を検出してデコード
         import base64
         try:
-            # 先頭バイトがASCII文字（Base64）かどうか確認
-            sample = audio_data[:100].strip()
-            if all(c in b'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=\n\r ' for c in sample):
-                decoded = base64.b64decode(audio_data.strip())
-                # デコード後がMP3ヘッダー(ID3 or 0xFF 0xFB)かチェック
-                if decoded[:3] == b'ID3' or (decoded[0] == 0xFF and decoded[1] & 0xE0 == 0xE0):
-                    audio_data = decoded
-                    print(f"[UPLOAD-AUDIO] Base64 detected and decoded: {len(audio_data)} bytes", file=sys.stderr, flush=True)
+            # パターン1: n8nのBuffer JSON形式 {"type":"Buffer","data":[...]}
+            if audio_data[:2] == b'{"' or audio_data[:1] == b'{':
+                try:
+                    json_obj = json.loads(audio_data)
+                    if isinstance(json_obj, dict) and json_obj.get('type') == 'Buffer' and 'data' in json_obj:
+                        audio_data = bytes(json_obj['data'])
+                        print(f"[UPLOAD-AUDIO] Buffer JSON detected and decoded: {len(audio_data)} bytes", file=sys.stderr, flush=True)
+                except Exception:
+                    pass
+
+            # パターン2: Base64エンコードされたデータ
+            if audio_data[:3] != b'ID3' and not (len(audio_data) > 1 and audio_data[0] == 0xFF and audio_data[1] & 0xE0 == 0xE0):
+                sample = audio_data[:100].strip()
+                if all(c in b'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=\n\r ' for c in sample):
+                    try:
+                        decoded = base64.b64decode(audio_data.strip())
+                        if decoded[:3] == b'ID3' or (decoded[0] == 0xFF and decoded[1] & 0xE0 == 0xE0):
+                            audio_data = decoded
+                            print(f"[UPLOAD-AUDIO] Base64 detected and decoded: {len(audio_data)} bytes", file=sys.stderr, flush=True)
+                    except Exception:
+                        pass
         except Exception:
             pass  # デコード失敗時はそのまま使用
 
