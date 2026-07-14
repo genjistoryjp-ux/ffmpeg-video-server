@@ -1530,6 +1530,82 @@ def job_cancel(job_id):
     return jsonify({"success": True})
 
 
+@app.route('/test-kontext', methods=['POST'])
+def test_kontext():
+    """
+    Flux Kontext img2img テスト用エンドポイント
+    棒人間画像をベースにシーン内容に合った画像を生成して返す
+    """
+    import base64
+    import time
+    import requests as _req
+
+    data = request.get_json(force=True)
+    bfl_api_key = data.get("bfl_api_key", "")
+    pose_name = data.get("pose", "02_guts_pose.jpg")  # posesディレクトリのファイル名
+    prompt = data.get("prompt", "Keep this exact stick figure character. Add a simple mountain summit background with flag. Maintain white background and black line art style.")
+
+    if not bfl_api_key:
+        return jsonify({"success": False, "error": "bfl_api_key is required"}), 400
+
+    # ポーズ画像を読み込んでbase64エンコード
+    pose_path = os.path.join(POSES_DIR, pose_name)
+    if not os.path.exists(pose_path):
+        return jsonify({"success": False, "error": f"Pose not found: {pose_name}"}), 404
+
+    with open(pose_path, "rb") as f:
+        img_b64 = base64.b64encode(f.read()).decode()
+
+    # Flux Kontext API呼び出し
+    headers = {
+        "x-key": bfl_api_key,
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "prompt": prompt,
+        "input_image": img_b64,
+        "aspect_ratio": "16:9",
+        "output_format": "jpeg",
+        "safety_tolerance": 6,
+    }
+
+    try:
+        resp = _req.post(
+            "https://api.bfl.ml/v1/flux-kontext-pro",
+            headers=headers,
+            json=payload,
+            timeout=30
+        )
+        if resp.status_code != 200:
+            return jsonify({"success": False, "error": f"BFL API error: {resp.status_code} {resp.text}"}), 500
+
+        result = resp.json()
+        job_id_bfl = result.get("id")
+        if not job_id_bfl:
+            return jsonify({"success": False, "error": "No job ID returned"}), 500
+
+        # ポーリング（最大90秒）
+        for _ in range(30):
+            time.sleep(3)
+            poll_resp = _req.get(
+                f"https://api.bfl.ml/v1/get_result?id={job_id_bfl}",
+                headers={"x-key": bfl_api_key},
+                timeout=15
+            )
+            poll_data = poll_resp.json()
+            status = poll_data.get("status")
+            if status == "Ready":
+                image_url = poll_data.get("result", {}).get("sample")
+                return jsonify({"success": True, "image_url": image_url, "job_id": job_id_bfl})
+            elif status in ["Error", "Failed", "Content Moderated"]:
+                return jsonify({"success": False, "error": f"Generation failed: {status}"}), 500
+
+        return jsonify({"success": False, "error": "Timeout waiting for image"}), 500
+
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 if __name__ == '__main__':
     import os as _os
     port = int(_os.environ.get('PORT', 10000))
