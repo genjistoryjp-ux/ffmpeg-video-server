@@ -1245,10 +1245,12 @@ def generate_flux_image(pose_path, scene_data, index):
     scene_context = ' '.join(filter(None, [image_prompt, subtitle, keyword]))[:200]
 
     prompt = (
-        f"Keep this exact stick figure character with the same pose and proportions. "
-        f"Add a vivid, detailed background and environment that matches this scene: {scene_context}. "
-        f"Maintain the black line art stick figure style. Make the background colorful and expressive "
-        f"to enhance the visual storytelling. High quality illustration style."
+        f"This image contains a simple black line art stick figure on a white background. "
+        f"DO NOT change the stick figure at all - keep it exactly as a simple black line drawing. "
+        f"ONLY add a background scene behind the stick figure that matches: {scene_context}. "
+        f"The stick figure must remain as a flat 2D black line art drawing with white fill. "
+        f"Add a colorful illustrated background environment only. "
+        f"The character style must stay as simple black line art stick figure, not 3D, not colored, not realistic."
     )
 
     headers = {
