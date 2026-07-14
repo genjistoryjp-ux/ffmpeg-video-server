@@ -336,7 +336,7 @@ def create_slideshow():
     # アニメーション設定
     enable_ken_burns = data.get("enable_ken_burns", True)
     enable_text_animation = data.get("enable_text_animation", True)
-    enable_transitions = data.get("enable_transitions", True)
+    enable_transitions = data.get("enable_transitions", False)  # メモリ節約のためデフォルトFalse
     transition_duration = data.get("transition_duration", 0.5)  # クロスフェード秒数
 
     if not images:
@@ -1184,7 +1184,7 @@ def generate_slideshow():
     title = data.get("title", "")
     subtitle_font_size = data.get("subtitle_font_size", 44)
     enable_ken_burns = data.get("enable_ken_burns", True)
-    enable_transitions = data.get("enable_transitions", True)
+    enable_transitions = data.get("enable_transitions", False)  # メモリ節約のためデフォルトFalse
     transition_duration = data.get("transition_duration", 0.5)
     test_mode = data.get("test_mode", False)  # テストモード: Flux APIをスキップしてダミー画像を使用
 
@@ -1362,7 +1362,7 @@ def _run_slideshow_job(job_id, job_dir, scenes, audio_b64, audio_url, audio_path
                 "-loop", "1", "-i", img_path,
                 "-t", str(duration),
                 "-vf", vf_str,
-                "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
                 "-r", str(fps),
                 clip_path
             ]
@@ -1371,22 +1371,23 @@ def _run_slideshow_job(job_id, job_dir, scenes, audio_b64, audio_url, audio_path
                 raise Exception(f"FFmpeg clip {i} failed: {result.stderr[-500:]}")
             clip_files.append(clip_path)
             clip_durations.append(duration)
+            print(f"[JOB {job_id}] Clip {i+1}/{len(images_data)} created", file=sys.stderr, flush=True)
 
         # クリップを結合
         output_filename = f"{job_id}.mp4"
         output_path = os.path.join(OUTPUT_DIR, output_filename)
 
-        if enable_transitions and len(clip_files) > 1:
-            final_video = _concat_with_xfade(clip_files, clip_durations, output_path, transition_duration, fps, job_dir)
-        else:
-            concat_list = os.path.join(job_dir, "concat.txt")
-            with open(concat_list, 'w') as f:
-                for cf in clip_files:
-                    f.write(f"file '{cf}'\n")
-            cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_list,
-                   "-c", "copy", output_path]
-            subprocess.run(cmd, capture_output=True, check=True, timeout=300)
-            final_video = output_path
+        # XFADEは2GBでもOOMを引き起こすため廃止。シンプルなconcatを使用。
+        concat_list = os.path.join(job_dir, "concat.txt")
+        with open(concat_list, 'w') as f:
+            for cf in clip_files:
+                f.write(f"file '{cf}'\n")
+        print(f"[JOB {job_id}] Concatenating {len(clip_files)} clips with simple concat...", file=sys.stderr, flush=True)
+        cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_list,
+               "-c", "copy", output_path]
+        subprocess.run(cmd, capture_output=True, check=True, timeout=600)
+        final_video = output_path
+        print(f"[JOB {job_id}] Concat done: {output_path}", file=sys.stderr, flush=True)
 
         # 音声を合成
         if audio_path and os.path.exists(audio_path):
