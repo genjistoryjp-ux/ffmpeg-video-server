@@ -1087,7 +1087,11 @@ def upload_audio_v2():
         base_url = request.host_url.rstrip('/')
         audio_url = f"{base_url}/audio/{audio_filename}"
 
-        print(f"[UPLOAD-AUDIO] Saved {audio_filename}: {file_size} bytes", file=sys.stderr, flush=True)
+        # 先頭バイトをログ出力（デバッグ用）
+        header_hex = audio_data[:16].hex()
+        header_ascii = ''.join(chr(b) if 32 <= b < 127 else '.' for b in audio_data[:16])
+        content_type = request.content_type or 'unknown'
+        print(f"[UPLOAD-AUDIO] Saved {audio_filename}: {file_size} bytes | Content-Type: {content_type} | Header hex: {header_hex} | ASCII: {header_ascii}", file=sys.stderr, flush=True)
 
         return jsonify({
             "success": True,
