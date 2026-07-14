@@ -1113,69 +1113,113 @@ def serve_audio(filename):
 
 # =============================================
 # 画像生成＋スライドショー統合エンドポイント
-# n8nからシーンデータを受け取り、Flux APIで画像生成→FFmpegで動画作成まで全部サーバー側で実行
+# 事前生成済みポーズ画像を使用（Flux API不使用）
 # =============================================
-BFL_API_KEY = os.environ.get('BFL_API_KEY', 'bfl_LGwYiAaxche88emhqdCrl6SjeCwjNU0d')
-CHARACTER_REF_URL = os.environ.get('CHARACTER_REF_URL', 'https://files.manuscdn.com/user_upload_by_module/session_file/310519663781653791/LpZBtmedefHZdMop.png')
 
-def select_pose(image_prompt):
-    """シーンの内容に合わせてポーズを選択する"""
-    p = (image_prompt or '').lower()
-    if any(k in p for k in ['驚', '衝撃', 'びっくり', 'excited', 'surprise']):
-        return 'excited/happy pose (pose 3): arms raised, big smile'
-    elif any(k in p for k in ['考', '疑問', 'なぜ', 'think', 'wonder']):
-        return 'thinking pose (pose 2): hand on chin, thoughtful expression'
-    elif any(k in p for k in ['疲', '悲', '失敗', 'sad', 'tired']):
-        return 'tired/sad pose (pose 4): slouching, sad expression'
-    elif any(k in p for k in ['説明', '教', 'ポイント', 'point', 'teach']):
-        return 'pointing/teaching pose (pose 5): arm extended pointing, smile'
-    elif any(k in p for k in ['作業', '仕事', 'パソコン', 'work', 'desk']):
-        return 'sitting at desk pose (pose 6): working on laptop'
-    else:
-        return 'standing neutral pose (pose 1): relaxed, friendly smile'
+# 事前生成済みポーズ画像のディレクトリ（Render.comのリポジトリ内）
+POSES_DIR = os.path.join(os.path.dirname(__file__), 'poses')
 
-def generate_image_flux(scene_data, job_dir, index):
-    """Flux APIで1シーンの画像を生成してファイルパスを返す"""
-    image_prompt = scene_data.get('image_prompt', '')
-    pose = select_pose(image_prompt)
-    base_style = "Use the exact same stick figure character from the reference image: slim stick figure with necktie, small hair tuft, expressive round face. PURE WHITE BACKGROUND (#FFFFFF), solid white background only, NO dark background, NO black background, NO gray background. Black ink stick figure on white background. Clean black ink lines only, minimal flat 2D style, no shading, no color fills, white background is mandatory."
-    prompt = f"{base_style} Character pose: {pose}. Scene: {image_prompt}"
+# キーワード → ポーズファイル名のマッピング
+# シーンの内容（image_prompt, subtitle, keyword）に含まれるキーワードで選択
+POSE_MAPPING = [
+    # 成功・達成
+    (['成功', '達成', '完成', '完了', '合格', 'success', 'achieve', 'win', 'goal', '目標達成', '両手', '万歳'], '01_both_hands_up.jpg'),
+    (['ガッツ', 'ガッツポーズ', '拳', 'やった', '勝利', 'fist', 'victory', 'triumph', 'よし'], '02_guts_pose.jpg'),
+    (['ジャンプ', '飛ぶ', '喜び', 'jump', 'leap', 'joy', 'excited', '嬉しい', 'うれしい'], '03_jump.jpg'),
+    (['トロフィー', '賞', '表彰', '1位', '一位', 'trophy', 'award', 'prize', '優勝'], '04_trophy.jpg'),
+    (['ゴール', 'ゴールテープ', 'フィニッシュ', '完走', 'finish', 'finish line', 'goal line'], '05_finish_line.jpg'),
+    # 考える・気づき
+    (['考える', '考え', '思考', '検討', 'think', 'ponder', 'consider', '熟考', '顎'], '06_thinking_chin.jpg'),
+    (['ひらめき', 'アイデア', '気づき', '発見', '電球', 'idea', 'eureka', 'lightbulb', 'insight', '閃き'], '07_lightbulb.jpg'),
+    (['本', '読書', '読む', '学習', '勉強', 'book', 'read', 'study', 'learning', '書籍'], '08_reading_book.jpg'),
+    (['メモ', 'ノート', '書く', '記録', 'note', 'write', 'memo', 'record', 'jot'], '09_taking_notes.jpg'),
+    (['疑問', '？', 'なぜ', 'どうして', 'question', 'why', 'wonder', 'confused', '不思議'], '10_question.jpg'),
+    # 挑戦・行動
+    (['走る', '走り', 'ダッシュ', '行動', '前進', 'run', 'dash', 'sprint', 'action', 'move'], '11_running.jpg'),
+    (['登る', '山', '上る', '挑戦', 'climb', 'mountain', 'ascend', 'challenge', '頂上', '山頂'], '12_climbing_mountain.jpg'),
+    (['扉', 'ドア', '開ける', '新しい', '機会', 'door', 'open', 'opportunity', 'new', '可能性'], '13_opening_door.jpg'),
+    (['指差す', '指す', '方向', '示す', 'point', 'direct', 'indicate', 'forward', '前', '未来'], '14_pointing_forward.jpg'),
+    (['一歩', '踏み出す', '始める', 'スタート', 'step', 'start', 'begin', 'first step', '第一歩'], '15_first_step.jpg'),
+    # 困難・壁
+    (['壁', '障害', '困難', 'wall', 'obstacle', 'barrier', 'block', '行き詰まり', '限界'], '16_wall.jpg'),
+    (['悩む', '頭を抱える', 'ストレス', '不安', 'stress', 'worry', 'anxious', 'troubled', '困る', '悩み'], '17_head_in_hands.jpg'),
+    (['転ぶ', '失敗', '倒れる', 'fall', 'fail', 'stumble', 'trip', '挫折', '転落'], '18_falling.jpg'),
+    (['重い', '背負う', '負担', '重荷', 'burden', 'heavy', 'carry', 'load', '重圧', 'プレッシャー'], '19_heavy_burden.jpg'),
+    (['立ち上がる', '復活', '回復', '再起', 'stand up', 'rise', 'recover', 'comeback', '立ち直る'], '20_standing_up.jpg'),
+    # 学ぶ・成長
+    (['黒板', '授業', '教室', 'blackboard', 'classroom', 'lesson', 'teach', '講義', 'ホワイトボード'], '21_blackboard.jpg'),
+    (['瞑想', '集中', '内省', '静か', 'meditate', 'meditation', 'focus', 'calm', '心', 'マインドフル'], '22_meditation.jpg'),
+    (['遠くを見る', '展望', 'ビジョン', '未来', 'vision', 'future', 'horizon', 'dream', '夢', '目標'], '23_looking_far.jpg'),
+    (['種', '育てる', '成長', '芽', '植える', 'seed', 'grow', 'plant', 'nurture', '育む', '可能性'], '24_planting_seed.jpg'),
+    (['グラフ', '上昇', '成長', '向上', '改善', 'graph', 'growth', 'improve', 'progress', '上がる', '増加'], '25_rising_graph.jpg'),
+    # 人間関係
+    (['握手', '協力', 'パートナー', '契約', 'handshake', 'cooperate', 'partner', 'deal', '協働'], '26_handshake.jpg'),
+    (['プレゼン', '発表', '説明', '伝える', 'present', 'presentation', 'explain', 'speech', '講演'], '27_presentation.jpg'),
+    (['いいね', 'サムズアップ', '承認', '賛成', 'thumbs up', 'like', 'approve', 'good', 'great', 'nice'], '28_thumbs_up.jpg'),
+    (['腕を組む', '自信', '堂々', '確信', 'arms crossed', 'confident', 'assertive', '自信満々'], '29_arms_crossed.jpg'),
+    (['お辞儀', '感謝', '礼', '挨拶', 'bow', 'thank', 'gratitude', 'greeting', 'respect', '礼儀'], '30_bow.jpg'),
+]
 
-    print(f"[GENERATE] Scene {index}: Generating image...", file=sys.stderr, flush=True)
+# ポーズ選択カウンター（同じポーズが連続しないよう管理）
+_pose_counter = 0
 
-    # Flux APIにリクエスト
-    resp = requests.post(
-        'https://api.bfl.ai/v1/flux-kontext-pro',
-        headers={'x-key': BFL_API_KEY, 'Content-Type': 'application/json'},
-        json={
-            'prompt': prompt,
-            'input_image': CHARACTER_REF_URL,
-            'aspect_ratio': '16:9',
-            'output_format': 'jpeg',
-            'safety_tolerance': 6
-        },
-        timeout=60
-    )
-    resp.raise_for_status()
-    result = resp.json()
-    polling_url = result.get('polling_url') or f"https://api.bfl.ai/v1/get_result?id={result.get('id')}"
+def select_pose_file(scene_data):
+    """
+    シーンデータ（image_prompt, subtitle, keyword）からキーワードマッチングで
+    最適なポーズ画像ファイルパスを返す。
+    マッチしない場合はシーン番号に応じてローテーション選択。
+    """
+    global _pose_counter
+    # 検索対象テキストを結合
+    search_text = ' '.join([
+        scene_data.get('image_prompt', ''),
+        scene_data.get('subtitle', ''),
+        scene_data.get('keyword', ''),
+    ]).lower()
 
-    # ポーリングで結果を取得（最大180秒）
-    for attempt in range(60):
-        time.sleep(3)
-        poll_resp = requests.get(polling_url, headers={'x-key': BFL_API_KEY}, timeout=30)
-        poll_resp.raise_for_status()
-        poll_data = poll_resp.json()
-        if poll_data.get('status') == 'Ready' and poll_data.get('result', {}).get('sample'):
-            img_url = poll_data['result']['sample']
-            img_path = os.path.join(job_dir, f"image_{index:03d}.jpg")
-            download_file(img_url, img_path)
-            print(f"[GENERATE] Scene {index}: Image ready -> {img_path}", file=sys.stderr, flush=True)
-            return img_path
-        if poll_data.get('status') in ['Error', 'Failed']:
-            raise Exception(f"Flux API error for scene {index}: {poll_data.get('status')}")
+    # キーワードマッチング（スコアリング方式：最多マッチのポーズを選択）
+    best_pose = None
+    best_score = 0
+    for keywords, pose_file in POSE_MAPPING:
+        score = sum(1 for kw in keywords if kw.lower() in search_text)
+        if score > best_score:
+            best_score = score
+            best_pose = pose_file
 
-    raise Exception(f"Flux API timeout for scene {index}")
+    if best_pose:
+        pose_path = os.path.join(POSES_DIR, best_pose)
+        if os.path.exists(pose_path):
+            return pose_path
+
+    # マッチなし → ローテーション選択
+    all_poses = sorted([f for f in os.listdir(POSES_DIR) if f.endswith('.jpg')])
+    if all_poses:
+        pose_file = all_poses[_pose_counter % len(all_poses)]
+        _pose_counter += 1
+        return os.path.join(POSES_DIR, pose_file)
+
+    return None
+
+
+def generate_image_local(scene_data, job_dir, index):
+    """事前生成済みポーズ画像を選択してコピーし、ファイルパスを返す（Flux API不使用）"""
+    import shutil
+    pose_path = select_pose_file(scene_data)
+    if not pose_path or not os.path.exists(pose_path):
+        # フォールバック: グレー背景のダミー画像を生成
+        from PIL import Image as PILImage, ImageDraw
+        img = PILImage.new('RGB', (1080, 1080), color=(240, 240, 240))
+        draw = ImageDraw.Draw(img)
+        draw.text((540, 540), f"Scene {index+1}", fill=(100, 100, 100), anchor='mm')
+        img_path = os.path.join(job_dir, f"image_{index:03d}.jpg")
+        img.save(img_path, 'JPEG', quality=85)
+        print(f"[LOCAL] Scene {index}: Fallback dummy image", file=sys.stderr, flush=True)
+        return img_path
+
+    img_path = os.path.join(job_dir, f"image_{index:03d}.jpg")
+    shutil.copy2(pose_path, img_path)
+    print(f"[LOCAL] Scene {index}: Using pose '{os.path.basename(pose_path)}'", file=sys.stderr, flush=True)
+    return img_path
 
 
 @app.route('/generate-slideshow', methods=['POST'])
@@ -1292,7 +1336,7 @@ def _run_slideshow_job(job_id, job_dir, scenes, audio_b64, audio_url, audio_path
                 img.save(img_path, 'JPEG', quality=85)
                 print(f"[TEST] Scene {i}: Dummy image created -> {img_path}", file=sys.stderr, flush=True)
             else:
-                img_path = generate_image_flux(scene, job_dir, i)
+                img_path = generate_image_local(scene, job_dir, i)
             images_data.append({
                 "path": img_path,
                 "duration": round(per_scene, 1),
