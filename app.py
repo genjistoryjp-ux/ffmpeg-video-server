@@ -1468,7 +1468,21 @@ def _run_slideshow_job(job_id, job_dir, scenes, audio_b64, audio_url, audio_path
                 img.save(img_path, 'JPEG', quality=85)
                 print(f"[TEST] Scene {i}: Dummy image created -> {img_path}", file=sys.stderr, flush=True)
             else:
-                img_path = generate_image_local(scene, job_dir, i)
+                # n8n側でFlux生成済みのimage_urlがある場合はそれを優先使用
+                image_url_from_n8n = scene.get('image_url')
+                if image_url_from_n8n:
+                    img_path = os.path.join(job_dir, f"image_{i:03d}.jpg")
+                    try:
+                        resp = requests.get(image_url_from_n8n, timeout=60)
+                        resp.raise_for_status()
+                        with open(img_path, 'wb') as f:
+                            f.write(resp.content)
+                        print(f"[N8N-FLUX] Scene {i}: Downloaded pre-generated image ({len(resp.content)} bytes)", file=sys.stderr, flush=True)
+                    except Exception as e:
+                        print(f"[N8N-FLUX] Scene {i}: Download failed ({e}), falling back to local", file=sys.stderr, flush=True)
+                        img_path = generate_image_local(scene, job_dir, i)
+                else:
+                    img_path = generate_image_local(scene, job_dir, i)
             images_data.append({
                 "path": img_path,
                 "duration": round(per_scene, 1),
